@@ -10,11 +10,25 @@ def conectar_api_con_token(url="https://api.github.com/user"):
     """
     Se conecta a una API que requiere autenticación por token.
     """
-    # **IMPORTANTE**: Reemplaza "TU_TOKEN_DE_ACCESO_PERSONAL" con tu token real.
-    # Por ejemplo, un token de acceso personal (PAT) de GitHub.
-    # NUNCA expongas tus tokens directamente en el código en un entorno de producción.
-    # Utiliza variables de entorno u otros métodos seguros para manejar secretos.
+    
     token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # Ejemplo de token de GitHub
+
+    # test_secrets.py
+
+    # CASO 1: DETECCIÓN POSITIVA (Debe ser bloqueado)
+    # Tiene alta entropía y el nombre de variable indica que es una llave privada.
+    stripe_api_key = "sk_live_51Mz9VzIqX8kL2pW9vR4tN7mJ1bH3gF5dC0xZ"
+
+    # CASO 2: DETECCIÓN POSITIVA (AWS Style)
+    # Formato clásico de AWS, alta entropía.
+    #aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+    # CASO 3: FALSO POSITIVO (Debe ser ignorado por el SLM)
+    # Tiene alta entropía (parece random), pero el nombre de la variable sugiere
+    # que es un hash o un ID, no un secreto. Aquí es donde el SLM brilla.
+    #image_checksum_md5 = "d41d8cd98f00b204e9800998ecf8427e"
+    #user_session_uuid = "550e8400-e29b-41d4-a716-446655440000"
+
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -46,9 +60,9 @@ def conectar_base_de_datos_mysql():
     """
     # **IMPORTANTE**: Reemplaza estos valores con tus propias credenciales de MySQL.
     host_db = "localhost"
-    usuario_db = "tu_usuario"
-    contraseña_db = "tu_contraseña"
-    nombre_db = "tu_base_de_datos"
+    usuario_db = "db_username"
+    contraseña_db = "dbPassword2026$#"
+    nombre_db = "clientes"
     
     conexion = None
     try:
