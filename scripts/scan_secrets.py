@@ -59,7 +59,7 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
             result = json.loads(response.json()['response'])
             return result.get('is_secret', False), result.get('reason', 'Unknown')
     except Exception as e:
-        # Si falla la conexión, asumimos que es secreto por precaución
+        # Si falla la conexión, asumo secreto por seguridad
         return True, f"SLM Error: {str(e)}"
     
     return False, "SLM Analysis Failed"
@@ -90,7 +90,7 @@ def scan_file(filepath):
         for var_name, value in matches:
             if len(value) < 8: continue 
 
-            # AQUI es donde se llama a la función de entropía definida arriba
+            # se llama a la función de entropía
             entropy = shannon_entropy(value)
             
             if entropy > ENTROPY_THRESHOLD:
@@ -108,7 +108,7 @@ def scan_file(filepath):
                     })
     return issues
 
-# --- 4. FUNCIÓN PRINCIPAL ---
+# --- 4. FUNCIÓN MAIN ---
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('filenames', nargs='*')
@@ -121,7 +121,7 @@ def main():
     print(f"{Colors.HEADER}🔍 Iniciando escaneo de seguridad...{Colors.ENDC}")
 
     for filename in args.filenames:
-        # Llamamos a scan_file, NO a buscar_alta_entropia directamente
+        # Llamamos a scan_file
         found_issues = scan_file(filename)
         all_issues.extend(found_issues)
 
