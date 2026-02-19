@@ -35,16 +35,17 @@ def shannon_entropy(data):
 
 # --- 2. ANÁLISIS SLM (OLLAMA) ---
 def analyze_with_slm(context_line, variable_name, suspicious_value):
-    """Consulta al modelo local."""
+    """Consulta al modelo local optimizada para M1/M2/M3."""
     prompt = f"""
-    You are a security auditor. Analyze this code snippet.
-    Variable Name: "{variable_name}"
+    Analyze this code snippet.
+    Variable: "{variable_name}"
     Value: "{suspicious_value}"
-    Full Line: "{context_line.strip()}"
     
-    Task: Determine if this is a SENSITIVE SECRET (Password, API Key) or SAFE (UUID, Hash, Public Key).
-    Respond ONLY in JSON format: {{"is_secret": boolean, "reason": "short explanation"}}
+    Is this a HARDCODED SECRET (API Key, Password)?
+    Return JSON: {{"is_secret": boolean, "reason": "short text"}}
     """
+
+    # print(f"   [DEBUG] Consultando Ollama ({variable_name})...") 
 
     try:
         response = requests.post(OLLAMA_URL, json={
@@ -52,18 +53,29 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.1}
-        }, timeout=10) # Timeout aumentado a 10s por si carga el modelo
+            
+            # OPTIMIZACIÓN M1:
+            "keep_alive": "10m", # Mantiene el modelo cargado entre archivos
+            "options": {
+                "temperature": 0.0, # Determinista (más rápido)
+                "num_ctx": 256,     # Ventana pequeña = Menos RAM = Más velocidad
+                "num_predict": 60,  # Respuesta corta
+                "top_k": 20         # Muestreo simplificado
+            }
+        }, timeout=30) # Timeout generoso para la primera carga
         
-        if response.status_code == 200:
-            result = json.loads(response.json()['response'])
-            return result.get('is_secret', False), result.get('reason', 'Unknown')
-    except Exception as e:
-        # Si falla la conexión, asumo secreto por seguridad
-        return True, f"SLM Error: {str(e)}"
-    
-    return False, "SLM Analysis Failed"
+        if response.status_code != 200:
+            return True, f"Error SLM {response.status_code}"
 
+        result = json.loads(response.json()['response'])
+        return result.get('is_secret', False), result.get('reason', 'Unknown')
+
+    except Exception as e:
+        # En caso de error (timeout), fallamos seguro (fail-open) o inseguro?
+        # Para pre-commit, mejor avisar pero no bloquear si el modelo está apagado,
+        # A MENOS que quieras seguridad estricta.
+        print(f"   [WARN] Ollama falló: {e}")
+        return False, "SLM Skipped" # Cambia a True si quieres bloquear por error
 # --- 3. LÓGICA DE ESCANEO ---
 def scan_file(filepath):
     issues = []

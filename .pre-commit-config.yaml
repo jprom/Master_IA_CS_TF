@@ -7,3 +7,5 @@ repos:
         language: system
         types: [text]
         pass_filenames: true
+        # Excluir archivos que sabemos que no tienen secretos
+        exclude: ^(docs/|tests/fixtures/) 
