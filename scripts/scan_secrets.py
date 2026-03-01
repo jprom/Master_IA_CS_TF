@@ -35,16 +35,17 @@ def shannon_entropy(data):
 
 # --- 2. ANÁLISIS SLM (OLLAMA) ---
 def analyze_with_slm(context_line, variable_name, suspicious_value):
-    """Consulta al modelo local."""
+    """Consulta al modelo local con DEBUGGING."""
     prompt = f"""
     You are a security auditor. Analyze this code snippet.
     Variable Name: "{variable_name}"
     Value: "{suspicious_value}"
-    Full Line: "{context_line.strip()}"
     
-    Task: Determine if this is a SENSITIVE SECRET (Password, API Key) or SAFE (UUID, Hash, Public Key).
+    Task: Determine if this is a SENSITIVE SECRET (Password, API Key) or SAFE (UUID, Hash).
     Respond ONLY in JSON format: {{"is_secret": boolean, "reason": "short explanation"}}
     """
+
+    print(f"   [DEBUG] Enviando a Ollama ({variable_name})...") # DEBUG
 
     try:
         response = requests.post(OLLAMA_URL, json={
@@ -53,16 +54,23 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
             "stream": False,
             "format": "json",
             "options": {"temperature": 0.1}
-        }, timeout=10) # Timeout aumentado a 10s por si carga el modelo
+        }, timeout=10)
         
-        if response.status_code == 200:
-            result = json.loads(response.json()['response'])
-            return result.get('is_secret', False), result.get('reason', 'Unknown')
+        # DEBUG: Ver qué responde exactamente Ollama
+        if response.status_code != 200:
+            print(f"   [ERROR SLM] Status Code: {response.status_code}")
+            print(f"   [ERROR SLM] Respuesta: {response.text}")
+            return True, f"Error del Servidor SLM (Code {response.status_code})"
+
+        result = json.loads(response.json()['response'])
+        return result.get('is_secret', False), result.get('reason', 'Unknown')
+
+    except requests.exceptions.ConnectionError:
+        print(f"   [ERROR CRÍTICO] No se puede conectar a Ollama en {OLLAMA_URL}")
+        return True, "Ollama no está corriendo o puerto bloqueado"
     except Exception as e:
-        # Si falla la conexión, asumo secreto por seguridad
-        return True, f"SLM Error: {str(e)}"
-    
-    return False, "SLM Analysis Failed"
+        print(f"   [ERROR] Excepción: {str(e)}")
+        return True, f"Error SLM: {str(e)}"
 
 # --- 3. LÓGICA DE ESCANEO ---
 def scan_file(filepath):
