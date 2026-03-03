@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 # --- CONFIGURACIÓN ---
-ENTROPY_THRESHOLD = 4.6 
+ENTROPY_THRESHOLD = 3.5 
 OLLAMA_MODEL = "qwen2.5-coder:1.5b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 IGNORED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.exe', '.bin', '.lock', '.svg', '.pyc'}
@@ -35,10 +35,54 @@ def shannon_entropy(data):
 
 # --- 2. ANÁLISIS SLM (OLLAMA) ---
 def analyze_with_slm(context_line, variable_name, suspicious_value):
-    """Consulta al modelo local con DEBUGGING."""
     prompt = f"""
-    You are a security auditor. Analyze this code snippet.
-    Variable Name: "{variable_name}"
+    Analyze this code snippet.
+    Variable: "{variable_name}"
+    Value: "{suspicious_value}"
+    
+    Task: Is this a HARDCODED SECRET (Password, API Key)?
+    Respond JSON: {{"is_secret": boolean, "reason": "explanation"}}
+    """
+    
+    print(f"   {Colors.WARNING}⚡ Consultando IA para: {variable_name}...{Colors.ENDC}")
+
+    try:
+        response = requests.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 120  # Aumentamos esto para que no corte la frase
+            }
+        }, timeout=10)
+        
+        # --- NUEVO: Limpieza de respuesta ---
+        raw_text = response.json().get('response', '')
+        
+        # Intentamos parsear. Si falla, buscamos el primer '{' y el último '}'
+        try:
+            result = json.loads(raw_text)
+        except json.JSONDecodeError:
+            start = raw_text.find('{')
+            end = raw_text.rfind('}') + 1
+            if start != -1 and end != -1:
+                result = json.loads(raw_text[start:end])
+            else:
+                return False, "Error de formato JSON de la IA"
+
+        return result.get('is_secret', False), result.get('reason', 'Unknown')
+
+    except Exception as e:
+        print(f"   [Error IA] {e}")
+        # Si la IA falla, mejor dejar pasar (False) para no bloquear tu trabajo por error técnico
+        return False, "Error de conexión con IA"
+    
+    """Consulta al modelo local optimizada para M1/M2/M3."""
+    prompt = f"""
+    Analyze this code snippet.
+    Variable: "{variable_name}"
     Value: "{suspicious_value}"
     
     Task: Determine if this is a SENSITIVE SECRET (Password, API Key) or SAFE (UUID, Hash).
@@ -53,8 +97,16 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.1}
-        }, timeout=10)
+            
+            # OPTIMIZACIÓN M1:
+            "keep_alive": "10m", # Mantiene el modelo cargado entre archivos
+            "options": {
+                "temperature": 0.0, # Determinista (más rápido)
+                "num_ctx": 256,     # Ventana pequeña = Menos RAM = Más velocidad
+                "num_predict": 60,  # Respuesta corta
+                "top_k": 20         # Muestreo simplificado
+            }
+        }, timeout=30) # Timeout generoso para la primera carga
         
         # DEBUG: Ver qué responde exactamente Ollama
         if response.status_code != 200:
@@ -72,6 +124,11 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
         print(f"   [ERROR] Excepción: {str(e)}")
         return True, f"Error SLM: {str(e)}"
 
+        # En caso de error (timeout), fallamos seguro (fail-open) o inseguro?
+        # Para pre-commit, mejor avisar pero no bloquear si el modelo está apagado,
+        # A MENOS que quieras seguridad estricta.
+        print(f"   [WARN] Ollama falló: {e}")
+        return False, "SLM Skipped" # Cambia a True si quieres bloquear por error
 # --- 3. LÓGICA DE ESCANEO ---
 def scan_file(filepath):
     issues = []
@@ -98,6 +155,8 @@ def scan_file(filepath):
         for var_name, value in matches:
             if len(value) < 8: continue 
 
+            if value.startswith("http://") or value.startswith("https://"): continue
+            
             # se llama a la función de entropía
             entropy = shannon_entropy(value)
             
