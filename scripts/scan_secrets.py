@@ -14,7 +14,7 @@ from pathlib import Path
 # URL de tu Webhook de n8n (Cámbiala por la tuya real)
 N8N_WEBHOOK_URL = "http://localhost:5678/webhook-test/notification"
 
-ENTROPY_THRESHOLD = 3.5 
+ENTROPY_THRESHOLD = 4.5 
 OLLAMA_MODEL = "qwen2.5-coder:1.5b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 IGNORED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.exe', '.bin', '.lock', '.svg', '.pyc', '.git'}
