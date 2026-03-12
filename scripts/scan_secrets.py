@@ -5,14 +5,19 @@ import json
 import re
 import argparse
 import requests
+import getpass  # <--- Para obtener el usuario
+import os
 from collections import Counter
 from pathlib import Path
 
 # --- CONFIGURACIÓN ---
+# URL de tu Webhook de n8n (Cámbiala por la tuya real)
+N8N_WEBHOOK_URL = "http://localhost:5678/webhook-test/notification"
+
 ENTROPY_THRESHOLD = 3.5 
 OLLAMA_MODEL = "qwen2.5-coder:1.5b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
-IGNORED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.exe', '.bin', '.lock', '.svg', '.pyc'}
+IGNORED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.exe', '.bin', '.lock', '.svg', '.pyc', '.git'}
 
 class Colors:
     HEADER = '\033[95m'
@@ -33,18 +38,21 @@ def shannon_entropy(data):
         entropy -= p_x * math.log2(p_x)
     return entropy
 
-# --- 2. ANÁLISIS SLM (OLLAMA) ---
+# --- 2. ANÁLISIS SLM (OLLAMA LOCAL) ---
 def analyze_with_slm(context_line, variable_name, suspicious_value):
+    """
+    Consulta al modelo local Ollama para confirmar si es un secreto.
+    """
     prompt = f"""
     Analyze this code snippet.
     Variable: "{variable_name}"
     Value: "{suspicious_value}"
     
-    Task: Is this a HARDCODED SECRET (Password, API Key)?
-    Respond JSON: {{"is_secret": boolean, "reason": "explanation"}}
+    Task: Determine if this is a SENSITIVE SECRET (Password, API Key) or SAFE (UUID, Hash, Public URL).
+    Respond ONLY in JSON format: {{"is_secret": boolean, "reason": "short explanation"}}
     """
-    
-    print(f"   {Colors.WARNING}⚡ Consultando IA para: {variable_name}...{Colors.ENDC}")
+
+    print(f"   {Colors.WARNING}⚡ Consultando IA Local ({variable_name})...{Colors.ENDC}")
 
     try:
         response = requests.post(OLLAMA_URL, json={
@@ -53,88 +61,55 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": 0.1,
-                "num_predict": 120  # Aumentamos esto para que no corte la frase
+                "temperature": 0.1, 
+                "num_predict": 100
             }
-        }, timeout=10)
+        }, timeout=20)
         
-        # --- NUEVO: Limpieza de respuesta ---
+        if response.status_code != 200:
+            return False, f"Error Ollama: {response.status_code}"
+
+        # Limpieza y parseo de la respuesta
         raw_text = response.json().get('response', '')
-        
-        # Intentamos parsear. Si falla, buscamos el primer '{' y el último '}'
         try:
             result = json.loads(raw_text)
         except json.JSONDecodeError:
+            # Intento de recuperación si el JSON viene sucio
             start = raw_text.find('{')
             end = raw_text.rfind('}') + 1
             if start != -1 and end != -1:
                 result = json.loads(raw_text[start:end])
             else:
-                return False, "Error de formato JSON de la IA"
+                return False, "Error formato JSON IA"
 
         return result.get('is_secret', False), result.get('reason', 'Unknown')
 
     except Exception as e:
         print(f"   [Error IA] {e}")
-        # Si la IA falla, mejor dejar pasar (False) para no bloquear tu trabajo por error técnico
-        return False, "Error de conexión con IA"
-    
-    """Consulta al modelo local optimizada para M1/M2/M3."""
-    prompt = f"""
-    Analyze this code snippet.
-    Variable: "{variable_name}"
-    Value: "{suspicious_value}"
-    
-    Task: Determine if this is a SENSITIVE SECRET (Password, API Key) or SAFE (UUID, Hash).
-    Respond ONLY in JSON format: {{"is_secret": boolean, "reason": "short explanation"}}
-    """
+        return False, "Error conexión IA"
 
-    print(f"   [DEBUG] Enviando a Ollama ({variable_name})...") # DEBUG
+# --- 3. REPORTE A N8N ---
+def send_alert_to_n8n(issues):
+    """Envía el reporte de secretos encontrados a n8n."""
+    print(f"   {Colors.FAIL}📡 Enviando alerta a n8n (Slack)...{Colors.ENDC}")
+    
+    payload = {
+        "user": getpass.getuser(),
+        "project": os.path.basename(os.getcwd()),
+        "secrets_found": len(issues),
+        "details": issues
+    }
 
     try:
-        response = requests.post(OLLAMA_URL, json={
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            
-            # OPTIMIZACIÓN M1:
-            "keep_alive": "10m", # Mantiene el modelo cargado entre archivos
-            "options": {
-                "temperature": 0.0, # Determinista (más rápido)
-                "num_ctx": 256,     # Ventana pequeña = Menos RAM = Más velocidad
-                "num_predict": 60,  # Respuesta corta
-                "top_k": 20         # Muestreo simplificado
-            }
-        }, timeout=30) # Timeout generoso para la primera carga
-        
-        # DEBUG: Ver qué responde exactamente Ollama
-        if response.status_code != 200:
-            print(f"   [ERROR SLM] Status Code: {response.status_code}")
-            print(f"   [ERROR SLM] Respuesta: {response.text}")
-            return True, f"Error del Servidor SLM (Code {response.status_code})"
-
-        result = json.loads(response.json()['response'])
-        return result.get('is_secret', False), result.get('reason', 'Unknown')
-
-    except requests.exceptions.ConnectionError:
-        print(f"   [ERROR CRÍTICO] No se puede conectar a Ollama en {OLLAMA_URL}")
-        return True, "Ollama no está corriendo o puerto bloqueado"
+        requests.post(N8N_WEBHOOK_URL, json=payload, timeout=5)
     except Exception as e:
-        print(f"   [ERROR] Excepción: {str(e)}")
-        return True, f"Error SLM: {str(e)}"
+        print(f"   ⚠️ No se pudo enviar la alerta a n8n: {e}")
 
-        # En caso de error (timeout), fallamos seguro (fail-open) o inseguro?
-        # Para pre-commit, mejor avisar pero no bloquear si el modelo está apagado,
-        # A MENOS que quieras seguridad estricta.
-        print(f"   [WARN] Ollama falló: {e}")
-        return False, "SLM Skipped" # Cambia a True si quieres bloquear por error
-# --- 3. LÓGICA DE ESCANEO ---
+# --- 4. LÓGICA DE ESCANEO ---
 def scan_file(filepath):
     issues = []
     path = Path(filepath)
     
-    # Ignorar tipos de archivo y verificar existencia
     if path.suffix in IGNORED_EXTENSIONS or not path.exists() or path.is_dir():
         return issues
 
@@ -144,25 +119,25 @@ def scan_file(filepath):
     except Exception:
         return issues
 
-    # Regex: Busca asignaciones tipo variable = "valor"
+    # Regex: Variable = "Valor"
     assignment_pattern = re.compile(r'([a-zA-Z0-9_.-]+)\s*[:=]\s*["\']([^"\']+)["\']')
 
     for i, line in enumerate(lines):
-        if len(line) > 500: continue # Ignorar líneas minificadas
+        if len(line) > 500: continue 
 
         matches = assignment_pattern.findall(line)
         
         for var_name, value in matches:
             if len(value) < 8: continue 
-
             if value.startswith("http://") or value.startswith("https://"): continue
             
-            # se llama a la función de entropía
+            # 1. Filtro de Entropía
             entropy = shannon_entropy(value)
             
             if entropy > ENTROPY_THRESHOLD:
-                print(f"{Colors.OKBLUE}[INFO] Analizando candidato en {filepath}:{i+1} (Entropía: {entropy:.2f})...{Colors.ENDC}")
+                print(f"{Colors.OKBLUE}[INFO] Candidato en {filepath}:{i+1} (Entropía: {entropy:.2f}){Colors.ENDC}")
                 
+                # 2. Confirmación con IA Local
                 is_secret, reason = analyze_with_slm(line, var_name, value)
                 
                 if is_secret:
@@ -170,12 +145,12 @@ def scan_file(filepath):
                         "file": filepath,
                         "line": i + 1,
                         "variable": var_name,
-                        "entropy": entropy,
+                        "entropy": round(entropy, 2),
                         "reason": reason
                     })
     return issues
 
-# --- 4. FUNCIÓN MAIN ---
+# --- 5. FUNCIÓN MAIN ---
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('filenames', nargs='*')
@@ -185,18 +160,23 @@ def main():
         return
 
     all_issues = []
-    print(f"{Colors.HEADER}🔍 Iniciando escaneo de seguridad...{Colors.ENDC}")
+    print(f"{Colors.HEADER}🔍 Iniciando escaneo local de seguridad...{Colors.ENDC}")
 
     for filename in args.filenames:
-        # Llamamos a scan_file
         found_issues = scan_file(filename)
         all_issues.extend(found_issues)
 
     if all_issues:
-        print(f"\n{Colors.FAIL}🚨 ¡ALERTA! SECRETOS DETECTADOS:{Colors.ENDC}")
+        # SI SE ENCUENTRAN SECRETOS:
+        print(f"\n{Colors.FAIL}🚨 ¡ALERTA! SECRETOS CONFIRMADOS POR IA LOCAL:{Colors.ENDC}")
+        
         for issue in all_issues:
-            print(f"📂 {issue['file']}:{issue['line']} -> {issue['variable']} (Entropía: {issue['entropy']:.2f})")
+            print(f"📂 {issue['file']}:{issue['line']} -> {issue['variable']}")
             print(f"   Razón: {issue['reason']}")
+        
+        # ---> AQUÍ SE LLAMA A N8N <---
+        send_alert_to_n8n(all_issues)
+        
         sys.exit(1) # Bloquea el commit
     else:
         print(f"{Colors.OKGREEN}✅ Escaneo limpio.{Colors.ENDC}")
