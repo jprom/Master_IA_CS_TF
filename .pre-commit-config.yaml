@@ -3,9 +3,9 @@ repos:
     hooks:
       - id: detector-secretos-slm
         name: Detección de Secretos (Entropía + SLM)
-        entry: python3 scripts/scan_secrets.py
+        entry: python3 scripts/hybrid_security_scanner.py
         language: system
         types: [text]
         pass_filenames: true
         # Excluir archivos que sabemos que no tienen secretos
-        exclude: ^(docs/|tests/fixtures/|scripts/scan_secrets.py|.*\.(md|txt|json|yml|yaml|xml|csv|log))$ 
+        exclude: ^(docs/|tests/fixtures/|scripts/hybrid_security_scanner.py|.*\.(md|txt|json|yml|yaml|xml|csv|log))$ 
