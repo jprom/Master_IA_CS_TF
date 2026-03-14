@@ -15,9 +15,12 @@ from pathlib import Path
 N8N_WEBHOOK_URL = "http://localhost:5678/webhook-test/notification"
 
 ENTROPY_THRESHOLD = 4.5 
-OLLAMA_MODEL = "qwen2.5-coder:1.5b"
+OLLAMA_MODEL = "qwen2.5-coder:1.5b" 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-IGNORED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.exe', '.bin', '.lock', '.svg', '.pyc', '.git'}
+IGNORED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.exe', '.bin', '.lock', '.svg', '.pyc', '.git', '.css', '.scss'}
+
+# Configuración de contexto
+CONTEXT_WINDOW_SIZE = 100 
 
 class Colors:
     HEADER = '\033[95m'
@@ -38,21 +41,50 @@ def shannon_entropy(data):
         entropy -= p_x * math.log2(p_x)
     return entropy
 
-# --- 2. ANÁLISIS SLM (OLLAMA LOCAL) ---
-def analyze_with_slm(context_line, variable_name, suspicious_value):
+# --- 2. EXTRACCIÓN DE CONTEXTO ---
+def get_context_window(lines, target_index, window=CONTEXT_WINDOW_SIZE):
     """
-    Consulta al modelo local Ollama para confirmar si es un secreto.
+    Extrae un bloque de código alrededor de la línea objetivo.
+    Devuelve el código con números de línea para ayudar al LLM.
+    """
+    start = max(0, target_index - window)
+    end = min(len(lines), target_index + window + 1)
+    
+    context_str = ""
+    for i in range(start, end):
+        prefix = ">> " if i == target_index else "   "
+        context_str += f"{prefix}Line {i+1}: {lines[i]}"
+    
+    return context_str
+
+# --- 3. ANÁLISIS SLM (OLLAMA LOCAL) ---
+def analyze_with_slm(full_context, variable_name, suspicious_value, filename):
+    """
+    Consulta al modelo local Ollama enviando el contexto del código.
     """
     prompt = f"""
-    Analyze this code snippet.
-    Variable: "{variable_name}"
-    Value: "{suspicious_value}"
+    You are a Senior Security Engineer reviewing code.
     
-    Task: Determine if this is a SENSITIVE SECRET (Password, API Key) or SAFE (UUID, Hash, Public URL).
-    Respond ONLY in JSON format: {{"is_secret": boolean, "reason": "short explanation"}}
+    I found a high-entropy string in file: '{filename}'.
+    
+    Variable Name: "{variable_name}"
+    Suspicious Value: "{suspicious_value}"
+    
+    Below is the CODE CONTEXT (surrounding lines). Analyze how this variable is USED.
+    
+    --- BEGIN CODE CONTEXT ---
+    {full_context}
+    --- END CODE CONTEXT ---
+    
+    Analysis Rules:
+    1. If the variable is used for Authentication (API Key, Password, Secret, Bearer Token), return "is_secret": true.
+    2. If the variable is a UUID, Checksum, Hash, Public ID, CSS Class, or Random Seed, return "is_secret": false.
+    3. Look at the variable name semantics (e.g., 'api_key' is suspicious, 'image_id' is safe).
+    
+    Respond ONLY in JSON format: {{"is_secret": boolean, "reason": "short explanation based on context"}}
     """
 
-    print(f"   {Colors.WARNING}⚡ Consultando IA Local ({variable_name})...{Colors.ENDC}")
+    print(f"   {Colors.WARNING}⚡ Analizando contexto con IA Local ({variable_name})...{Colors.ENDC}")
 
     try:
         response = requests.post(OLLAMA_URL, json={
@@ -61,10 +93,10 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": 0.1, 
-                "num_predict": 100
+                "temperature": 0.1, # Baja temperatura para ser más analítico
+                "num_ctx": 4096     # Aumentamos ventana de contexto del modelo
             }
-        }, timeout=20)
+        }, timeout=30) # Aumentamos timeout porque procesar contexto toma más tiempo
         
         if response.status_code != 200:
             return False, f"Error Ollama: {response.status_code}"
@@ -88,7 +120,7 @@ def analyze_with_slm(context_line, variable_name, suspicious_value):
         print(f"   [Error IA] {e}")
         return False, "Error conexión IA"
 
-# --- 3. REPORTE A N8N ---
+# --- 4. REPORTE A N8N ---
 def send_alert_to_n8n(issues):
     """Envía el reporte de secretos encontrados a n8n."""
     print(f"   {Colors.FAIL}📡 Enviando alerta a n8n (Slack)...{Colors.ENDC}")
@@ -105,7 +137,7 @@ def send_alert_to_n8n(issues):
     except Exception as e:
         print(f"   ⚠️ No se pudo enviar la alerta a n8n: {e}")
 
-# --- 4. LÓGICA DE ESCANEO ---
+# --- 5. LÓGICA DE ESCANEO ---
 def scan_file(filepath):
     issues = []
     path = Path(filepath)
@@ -137,8 +169,12 @@ def scan_file(filepath):
             if entropy > ENTROPY_THRESHOLD:
                 print(f"{Colors.OKBLUE}[INFO] Candidato en {filepath}:{i+1} (Entropía: {entropy:.2f}){Colors.ENDC}")
                 
-                # 2. Confirmación con IA Local
-                is_secret, reason = analyze_with_slm(line, var_name, value)
+                # PREPARAR CONTEXTO
+                # Obtenemos 100 líneas antes y después para que la IA entienda la lógica
+                code_context = get_context_window(lines, i)
+                
+                # 2. Confirmación con IA Local + Contexto
+                is_secret, reason = analyze_with_slm(code_context, var_name, value, filepath)
                 
                 if is_secret:
                     issues.append({
@@ -146,11 +182,12 @@ def scan_file(filepath):
                         "line": i + 1,
                         "variable": var_name,
                         "entropy": round(entropy, 2),
-                        "reason": reason
+                        "reason": reason,
+                        "snippet": line.strip() # Enviamos solo la línea del secreto para evitar exponer el valor real
                     })
     return issues
 
-# --- 5. FUNCIÓN MAIN ---
+# --- 6. FUNCIÓN MAIN ---
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('filenames', nargs='*')
@@ -160,7 +197,7 @@ def main():
         return
 
     all_issues = []
-    print(f"{Colors.HEADER}🔍 Iniciando escaneo local de seguridad...{Colors.ENDC}")
+    print(f"{Colors.HEADER}🔍 Iniciando escaneo local de seguridad con Contexto IA...{Colors.ENDC}")
 
     for filename in args.filenames:
         found_issues = scan_file(filename)
@@ -174,7 +211,7 @@ def main():
             print(f"📂 {issue['file']}:{issue['line']} -> {issue['variable']}")
             print(f"   Razón: {issue['reason']}")
         
-        # ---> AQUÍ SE LLAMA A N8N <---
+        # Ejecucion N8N
         send_alert_to_n8n(all_issues)
         
         sys.exit(1) # Bloquea el commit
