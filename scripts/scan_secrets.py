@@ -5,13 +5,13 @@ import json
 import re
 import argparse
 import requests
-import getpass  # <--- Para obtener el usuario
+import getpass 
 import os
 from collections import Counter
 from pathlib import Path
 
 # --- CONFIGURACIÓN ---
-# URL de tu Webhook de n8n (Cámbiala por la tuya real)
+
 N8N_WEBHOOK_URL = "http://localhost:5678/webhook-test/notification"
 
 ENTROPY_THRESHOLD = 4.5 
